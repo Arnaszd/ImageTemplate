@@ -1,13 +1,35 @@
 import sys
 import os
 import random
+import time
+from threading import Thread
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QLabel, QPushButton, QFileDialog, QLineEdit, QFrame, QSizePolicy,
                             QSlider, QFormLayout)
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QPainterPath, QColor, QFont, QCursor, QPen, QBrush
-from PyQt5.QtCore import Qt, QRect, QSize, QRectF, QTimer, QPoint
+from PyQt5.QtCore import Qt, QRect, QSize, QRectF, QTimer, QPoint, pyqtSignal, QObject
 from PIL import Image, ImageDraw, ImageFilter, ImageEnhance, ImageFont
 import numpy as np
+
+# Kurkime signalų klasę, kuri leis komunikuoti tarp gijų
+class WorkerSignals(QObject):
+    finished = pyqtSignal(object)
+
+# Darbinė gija vaizdo apdorojimui
+class ImageProcessingThread(Thread):
+    def __init__(self, app, image_path, title, artist, blur_amount):
+        Thread.__init__(self)
+        self.app = app
+        self.image_path = image_path
+        self.title = title
+        self.artist = artist
+        self.blur_amount = blur_amount
+        self.signals = WorkerSignals()
+        
+    def run(self):
+        # Apdoroti vaizdą atskiroje gijoje
+        result = self.app.create_template(self.image_path, self.title, self.artist, self.blur_amount)
+        self.signals.finished.emit(result)
 
 # Pagrindinis žvaigždžių animacijos klasė
 class StarryBackground(QWidget):
@@ -105,6 +127,15 @@ class ImageTemplateApp(QMainWindow):
         
         # Nustatyti tamsų stilių visai aplikacijai
         self.set_dark_style()
+        
+        # Kintamieji optimizacijai
+        self.processing_thread = None
+        self.cached_background = None
+        self.cached_blur_amount = None
+        self.last_text_change_time = 0
+        self.text_change_timer = QTimer()
+        self.text_change_timer.setSingleShot(True)
+        self.text_change_timer.timeout.connect(self.delayed_text_change)
         
         self.init_ui()
     
@@ -301,9 +332,23 @@ class ImageTemplateApp(QMainWindow):
         left_layout.setContentsMargins(10, 10, 10, 10)
     
     def on_text_changed(self):
-        """Atnaujina peržiūrą, kai keičiasi tekstas"""
-        if self.input_image_path:
-            self.process_image()
+        """Atideda vaizdo atnaujinimą, kad būtų išvengta stringimo"""
+        if not self.input_image_path:
+            return
+            
+        # Atidėti atnaujinimą 300ms
+        self.last_text_change_time = time.time()
+        self.text_change_timer.start(300)
+    
+    def delayed_text_change(self):
+        """Iškviečiama po atidėjimo, kai teksto keitimas nebevyksta"""
+        # Patikrinti, ar dar vyksta apdorojimas
+        if self.processing_thread and self.processing_thread.is_alive():
+            # Dar vyksta apdorojimas, atidėti dar 100ms
+            self.text_change_timer.start(100)
+            return
+            
+        self.process_image()
     
     def on_blur_changed(self, value):
         """Atnaujina blur efektą ir peržiūrą"""
@@ -329,8 +374,16 @@ class ImageTemplateApp(QMainWindow):
         title = self.title_input.text() or "TAU MICH AUF"
         artist = self.artist_input.text() or "NIKLAS DEE"
         
-        # Apdoroti vaizdą
-        self.processed_image = self.create_template(self.input_image_path, title, artist)
+        # Paleisti apdorojimą atskiroje gijoje
+        self.processing_thread = ImageProcessingThread(
+            self, self.input_image_path, title, artist, self.blur_amount
+        )
+        self.processing_thread.signals.finished.connect(self.on_image_processed)
+        self.processing_thread.start()
+    
+    def on_image_processed(self, result):
+        """Iškviečiama, kai vaizdo apdorojimas baigtas"""
+        self.processed_image = result
         
         # Konvertuoti PIL vaizdą į QPixmap
         img_array = np.array(self.processed_image)
@@ -343,53 +396,71 @@ class ImageTemplateApp(QMainWindow):
         scaled_pixmap = pixmap.scaled(self.preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.preview_label.setPixmap(scaled_pixmap)
     
-    def create_template(self, image_path, title, artist):
-        # Atidaryti pradinį vaizdą
-        original = Image.open(image_path).convert("RGB")
+    def create_template(self, image_path, title, artist, blur_amount=None):
+        # Naudoti blur_amount parametrą, jei jis perduotas
+        blur_amount = blur_amount if blur_amount is not None else self.blur_amount
         
-        # Sukurti 9:16 santykio drobę
-        target_width = 1080  # Standartinis 9:16 plotis
-        target_height = 1920  # Standartinis 9:16 aukštis
-        
-        # Pritaikyti vaizdą 9:16 santykiui
-        width, height = original.size
-        target_ratio = 9/16
-        
-        # Nustatyti naują dydį išlaikant santykį
-        if width / height > target_ratio:  # Per platus
-            new_width = int(height * target_ratio)
-            new_height = height
-            original_resized = original.crop(((width - new_width) // 2, 0, (width + new_width) // 2, height))
-        else:  # Per aukštas
-            new_width = width
-            new_height = int(width / target_ratio)
-            original_resized = original.crop((0, (height - new_height) // 2, width, (height + new_height) // 2))
-        
-        # Pakeisti dydį
-        background = original_resized.resize((target_width, target_height), Image.LANCZOS)
-        
-        # Pritaikyti blur efektą
-        if self.blur_amount > 0:
-            blur_radius = self.blur_amount / 10
-            background = background.filter(ImageFilter.GaussianBlur(radius=blur_radius))
-        
-        # Sukurti tamsinimo sluoksnį
-        overlay = Image.new("RGBA", (target_width, target_height), (0, 0, 0, 100))
+        # Cachinti fono vaizdą, jei blur reikšmė nepasikeitė
+        if self.cached_background is None or self.cached_blur_amount != blur_amount:
+            # Atidaryti pradinį vaizdą
+            original = Image.open(image_path).convert("RGB")
+            
+            # Pritaikyti vaizdą 9:16 santykiui
+            width, height = original.size
+            target_ratio = 9/16
+            target_width = 1080
+            target_height = 1920
+            
+            # Pjaustyti vaizdą pagal santykį
+            if width / height > target_ratio:
+                new_width = int(height * target_ratio)
+                new_height = height
+                original_resized = original.crop(((width - new_width) // 2, 0, (width + new_width) // 2, height))
+            else:
+                new_width = width
+                new_height = int(width / target_ratio)
+                original_resized = original.crop((0, (height - new_height) // 2, width, (height + new_height) // 2))
+            
+            # Pakeisti dydį
+            background = original_resized.resize((target_width, target_height), Image.LANCZOS)
+            
+            # Pritaikyti blur efektą - tai užima daug resursų, todėl cachinama
+            if blur_amount > 0:
+                # Sumažinti dydį prieš blur (greitesnis apdorojimas)
+                blur_img = background.resize((target_width // 2, target_height // 2), Image.LANCZOS)
+                blur_radius = blur_amount / 10
+                blur_img = blur_img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+                # Grąžinti pradinį dydį
+                background = blur_img.resize((target_width, target_height), Image.LANCZOS)
+            
+            # Sukurti tamsinimo sluoksnį
+            overlay = Image.new("RGBA", (target_width, target_height), (0, 0, 0, 100))
+            
+            # Sukurti galutinį fono vaizdą
+            final_background = Image.new("RGB", (target_width, target_height))
+            final_background.paste(background, (0, 0))
+            
+            # Pritaikyti tamsinimo sluoksnį
+            temp = Image.new("RGBA", (target_width, target_height))
+            temp.paste(final_background.convert("RGBA"), (0, 0))
+            final_background = Image.alpha_composite(temp, overlay).convert("RGB")
+            
+            # Išsaugoti cachintus objektus
+            self.cached_background = final_background.copy()
+            self.cached_blur_amount = blur_amount
+        else:
+            # Naudoti cachintą foną
+            final_background = self.cached_background.copy()
         
         # Sukurti galutinį vaizdą
-        final_image = Image.new("RGB", (target_width, target_height))
-        final_image.paste(background, (0, 0))
+        final_image = final_background.copy()
         
-        # Pritaikyti tamsinimo sluoksnį
-        temp = Image.new("RGBA", (target_width, target_height))
-        temp.paste(final_image.convert("RGBA"), (0, 0))
-        final_image = Image.alpha_composite(temp, overlay).convert("RGB")
-        
-        # Sukurti centrinį kvadratinį vaizdą
         # Apkarpyti originalią nuotrauką iki kvadrato (1:1 santykio)
+        original = Image.open(image_path).convert("RGB")
         square_img = self.crop_to_square(original)
         
         # Nustatyti kvadrato dydį (~70% ekrano pločio)
+        target_width = 1080
         square_size = int(target_width * 0.7)
         padding = 10  # 10px padding aplink kvadratą
         
@@ -404,8 +475,7 @@ class ImageTemplateApp(QMainWindow):
         
         # Centruoti poziciją - PAKELTI 200px į viršų
         x_pos = (target_width - square_size) // 2
-        # Originalus kodas: y_pos = int(target_height * 0.3)
-        y_pos = int(target_height * 0.3) - 200  # Pakelti 200px į viršų
+        y_pos = int(1920 * 0.3) - 200  # Pakelti 200px į viršų
         
         # Sukurti patamsintą foną kvadratui (75% ryškumo)
         dark_bg = Image.new('RGBA', (square_size + padding*2, square_size + padding*2), (0, 0, 0, 64))
@@ -427,8 +497,7 @@ class ImageTemplateApp(QMainWindow):
         draw = ImageDraw.Draw(final_image)
         
         # Atlikėjo vardas - didžiosiomis raidėmis - PAKELTI 200px į viršų
-        # Originalus kodas: artist_y = int(target_height * 0.75)
-        artist_y = int(target_height * 0.75) - 200  # Pakelti 200px į viršų
+        artist_y = int(1920 * 0.75) - 200  # Pakelti 200px į viršų
         artist_x = target_width // 2  # Centruota
         self.draw_text_centered(draw, artist.upper(), artist_x, artist_y, 60)
         
