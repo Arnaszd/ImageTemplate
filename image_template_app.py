@@ -1,28 +1,175 @@
 import sys
 import os
+import random
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QLabel, QPushButton, QFileDialog, QLineEdit, QFrame, QSizePolicy,
                             QSlider, QFormLayout)
-from PyQt5.QtGui import QPixmap, QImage, QPainter, QPainterPath, QColor, QFont
-from PyQt5.QtCore import Qt, QRect, QSize, QRectF
+from PyQt5.QtGui import QPixmap, QImage, QPainter, QPainterPath, QColor, QFont, QCursor, QPen, QBrush
+from PyQt5.QtCore import Qt, QRect, QSize, QRectF, QTimer, QPoint
 from PIL import Image, ImageDraw, ImageFilter, ImageEnhance, ImageFont
 import numpy as np
+
+# Pagrindinis žvaigždžių animacijos klasė
+class StarryBackground(QWidget):
+    def __init__(self, star_count=100, parent=None):
+        super(StarryBackground, self).__init__(parent)
+        self.setAutoFillBackground(True)
+        
+        # Nustatyti juodą foną
+        palette = self.palette()
+        palette.setColor(self.backgroundRole(), QColor(10, 10, 20))  # Tamsiai mėlynas-juodas fonas
+        self.setPalette(palette)
+        
+        # Žvaigždžių parametrai
+        self.star_count = star_count
+        self.stars = []
+        self.generate_stars()
+        
+        # Animacijos laikmatis
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_stars)
+        self.timer.start(50)  # Atnaujinti kas 50ms
+    
+    def generate_stars(self):
+        # Sugeneruoti atsitiktines žvaigždes
+        for _ in range(self.star_count):
+            x = random.randint(0, self.width() or 800)
+            y = random.randint(0, self.height() or 600)
+            size = random.uniform(1, 3)
+            brightness = random.uniform(0.3, 1.0)
+            twinkle_speed = random.uniform(0.01, 0.05)
+            twinkle_direction = random.choice([-1, 1])
+            
+            self.stars.append({
+                'x': x,
+                'y': y,
+                'size': size,
+                'brightness': brightness,
+                'twinkle_speed': twinkle_speed,
+                'twinkle_direction': twinkle_direction
+            })
+    
+    def update_stars(self):
+        # Atnaujinti žvaigždžių mirgėjimą
+        for star in self.stars:
+            # Keisti ryškumą
+            star['brightness'] += star['twinkle_speed'] * star['twinkle_direction']
+            
+            # Jei pasiekiama riba, pakeisti kryptį
+            if star['brightness'] > 1.0:
+                star['brightness'] = 1.0
+                star['twinkle_direction'] = -1
+            elif star['brightness'] < 0.3:
+                star['brightness'] = 0.3
+                star['twinkle_direction'] = 1
+        
+        # Atnaujinti ekraną
+        self.update()
+    
+    def resizeEvent(self, event):
+        # Perkurti žvaigždes, kai keičiasi lango dydis
+        self.stars = []
+        self.generate_stars()
+        super(StarryBackground, self).resizeEvent(event)
+    
+    def paintEvent(self, event):
+        # Nupiešti žvaigždes
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        for star in self.stars:
+            color = QColor(255, 255, 255, int(255 * star['brightness']))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(color))
+            
+            # Nupiešti žvaigždę kaip apskritimą
+            painter.drawEllipse(
+                QRectF(
+                    star['x'] - star['size'] / 2,
+                    star['y'] - star['size'] / 2,
+                    star['size'],
+                    star['size']
+                )
+            )
+
 
 class ImageTemplateApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Muzikos Viršelio Kūrėjas")
-        self.setMinimumSize(800, 600)
+        self.setMinimumSize(1000, 700)
         
         self.input_image_path = None
         self.processed_image = None
         self.blur_amount = 60  # Numatytasis blur kiekis (60%)
         
+        # Nustatyti tamsų stilių visai aplikacijai
+        self.set_dark_style()
+        
         self.init_ui()
+    
+    def set_dark_style(self):
+        # Tamsaus stiliaus QSS (Qt Style Sheets)
+        dark_style = """
+            QMainWindow, QWidget {
+                background-color: #121212;
+                color: #FFFFFF;
+            }
+            
+            QLabel {
+                color: #FFFFFF;
+            }
+            
+            QPushButton {
+                background-color: #2D2D2D;
+                color: #FFFFFF;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            
+            QPushButton:hover {
+                background-color: #3D3D3D;
+            }
+            
+            QPushButton:pressed {
+                background-color: #555555;
+            }
+            
+            QLineEdit {
+                background-color: #2D2D2D;
+                color: #FFFFFF;
+                border: 1px solid #555555;
+                border-radius: 4px;
+                padding: 5px;
+            }
+            
+            QSlider::groove:horizontal {
+                border: 1px solid #999999;
+                height: 8px;
+                background: #2D2D2D;
+                margin: 2px 0;
+                border-radius: 4px;
+            }
+            
+            QSlider::handle:horizontal {
+                background: #FFFFFF;
+                border: 1px solid #5c5c5c;
+                width: 18px;
+                margin: -2px 0;
+                border-radius: 9px;
+            }
+            
+            QSlider::handle:horizontal:hover {
+                background: #CCCCCC;
+            }
+        """
+        self.setStyleSheet(dark_style)
     
     def init_ui(self):
         # Pagrindinis išdėstymas
-        main_widget = QWidget()
+        main_widget = StarryBackground(star_count=150)  # Naudojame žvaigždėtą foną
         main_layout = QHBoxLayout()
         main_widget.setLayout(main_layout)
         self.setCentralWidget(main_widget)
@@ -32,24 +179,35 @@ class ImageTemplateApp(QMainWindow):
         left_layout = QVBoxLayout()
         left_panel.setLayout(left_layout)
         left_panel.setMaximumWidth(300)
+        left_panel.setStyleSheet("background-color: rgba(30, 30, 40, 180);")  # Pusiau permatomas fonas
+        
+        # Programos pavadinimas viršuje
+        title_label = QLabel("TikTok Image Template")
+        title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: white; margin: 10px;")
+        title_label.setAlignment(Qt.AlignCenter)
+        left_layout.addWidget(title_label)
         
         # Vaizdo pasirinkimo mygtukas
-        self.select_image_btn = QPushButton("Pasirinkti vaizdą")
+        self.select_image_btn = QPushButton("🖼️ Pasirinkti vaizdą")
         self.select_image_btn.clicked.connect(self.select_image)
         left_layout.addWidget(self.select_image_btn)
         
         # Formos išdėstymas
         form_layout = QFormLayout()
+        form_layout.setContentsMargins(10, 20, 10, 20)
+        form_layout.setSpacing(15)
         
         # Pavadinimo įvestis
         self.title_input = QLineEdit()
+        self.title_input.setPlaceholderText("Įveskite dainos pavadinimą")
         self.title_input.textChanged.connect(self.on_text_changed)
-        form_layout.addRow("Pavadinimas:", self.title_input)
+        form_layout.addRow("🎵 Pavadinimas:", self.title_input)
         
         # Atlikėjo įvestis
         self.artist_input = QLineEdit()
+        self.artist_input.setPlaceholderText("Įveskite atlikėjo vardą")
         self.artist_input.textChanged.connect(self.on_text_changed)
-        form_layout.addRow("Atlikėjas:", self.artist_input)
+        form_layout.addRow("🎤 Atlikėjas:", self.artist_input)
         
         # Blur slankiklis
         self.blur_slider = QSlider(Qt.Horizontal)
@@ -59,7 +217,7 @@ class ImageTemplateApp(QMainWindow):
         self.blur_slider.setTickPosition(QSlider.TicksBelow)
         self.blur_slider.setTickInterval(10)
         self.blur_slider.valueChanged.connect(self.on_blur_changed)
-        form_layout.addRow("Blur efektas:", self.blur_slider)
+        form_layout.addRow("🌫️ Blur efektas:", self.blur_slider)
         
         # Blur vertės etiketė
         self.blur_value_label = QLabel(f"{self.blur_amount}%")
@@ -68,12 +226,33 @@ class ImageTemplateApp(QMainWindow):
         left_layout.addLayout(form_layout)
         
         # Eksporto mygtukas
-        self.export_btn = QPushButton("Eksportuoti")
+        self.export_btn = QPushButton("💾 Eksportuoti")
         self.export_btn.clicked.connect(self.export_image)
         self.export_btn.setEnabled(False)
+        self.export_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;  /* Žalia spalva */
+                padding: 10px;
+                font-size: 16px;
+                margin-top: 20px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:disabled {
+                background-color: #333333;
+                color: #666666;
+            }
+        """)
         left_layout.addWidget(self.export_btn)
         
         left_layout.addStretch()
+        
+        # Kūrėjo informacija apačioje
+        creator_label = QLabel("17diamonds")
+        creator_label.setAlignment(Qt.AlignCenter)
+        creator_label.setStyleSheet("color: #999999; margin-bottom: 10px;")
+        left_layout.addWidget(creator_label)
         
         # Dešinysis skydelis - peržiūra
         right_panel = QWidget()
@@ -81,16 +260,45 @@ class ImageTemplateApp(QMainWindow):
         right_panel.setLayout(right_layout)
         
         # Peržiūros etiketė
-        self.preview_label = QLabel("Peržiūra")
+        self.preview_label = QLabel(self)
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setMinimumSize(450, 800)  # 9:16 santykis
-        self.preview_label.setStyleSheet("background-color: #222; color: white;")
+        self.preview_label.setStyleSheet("""
+            background-color: rgba(30, 30, 40, 100);
+            color: white;
+            border-radius: 10px;
+            padding: 10px;
+        """)
         self.preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        right_layout.addWidget(self.preview_label)
+        self.preview_label.setText("Spustelėkite čia, kad pasirinktumėte vaizdą")
+        self.preview_label.setCursor(QCursor(Qt.PointingHandCursor))
+        
+        # Pridėti spustelėjimo valdymą
+        self.preview_label.mousePressEvent = lambda event: self.select_image()
+        
+        preview_container = QWidget()
+        preview_container_layout = QVBoxLayout()
+        preview_container.setLayout(preview_container_layout)
+        preview_container_layout.addWidget(self.preview_label)
+        preview_container.setStyleSheet("background-color: transparent;")
+        
+        # Pridėti pavadinimą peržiūros srityje
+        preview_title = QLabel("Peržiūra")
+        preview_title.setAlignment(Qt.AlignCenter)
+        preview_title.setStyleSheet("font-size: 16px; color: white; margin-bottom: 10px;")
+        
+        right_layout.addWidget(preview_title)
+        right_layout.addWidget(preview_container)
         
         # Pridėti skydelius į pagrindinį išdėstymą
         main_layout.addWidget(left_panel)
         main_layout.addWidget(right_panel, 1)  # Dešinysis skydelis užima daugiau vietos
+        
+        # Nustatyti paddings ir margins
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(20)
+        right_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setContentsMargins(10, 10, 10, 10)
     
     def on_text_changed(self):
         """Atnaujina peržiūrą, kai keičiasi tekstas"""
@@ -194,9 +402,10 @@ class ImageTemplateApp(QMainWindow):
         corner_radius = 40
         draw_mask.rounded_rectangle([(0, 0), (square_size, square_size)], corner_radius, fill=255)
         
-        # Centruoti poziciją
+        # Centruoti poziciją - PAKELTI 200px į viršų
         x_pos = (target_width - square_size) // 2
-        y_pos = int(target_height * 0.3)  # Maždaug 30% nuo viršaus
+        # Originalus kodas: y_pos = int(target_height * 0.3)
+        y_pos = int(target_height * 0.3) - 200  # Pakelti 200px į viršų
         
         # Sukurti patamsintą foną kvadratui (75% ryškumo)
         dark_bg = Image.new('RGBA', (square_size + padding*2, square_size + padding*2), (0, 0, 0, 64))
@@ -217,8 +426,9 @@ class ImageTemplateApp(QMainWindow):
         # Pridėti teksto elementus
         draw = ImageDraw.Draw(final_image)
         
-        # Atlikėjo vardas - didžiosiomis raidėmis
-        artist_y = int(target_height * 0.75)  # 75% nuo viršaus
+        # Atlikėjo vardas - didžiosiomis raidėmis - PAKELTI 200px į viršų
+        # Originalus kodas: artist_y = int(target_height * 0.75)
+        artist_y = int(target_height * 0.75) - 200  # Pakelti 200px į viršų
         artist_x = target_width // 2  # Centruota
         self.draw_text_centered(draw, artist.upper(), artist_x, artist_y, 60)
         
