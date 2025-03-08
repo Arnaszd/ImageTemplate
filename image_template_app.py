@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                             QSlider, QFormLayout, QMessageBox, QDialog, QTextEdit, 
                             QComboBox, QProgressDialog, QCheckBox)
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QPainterPath, QColor, QFont, QCursor, QPen, QBrush
-from PyQt5.QtCore import Qt, QRect, QSize, QRectF, QTimer, QPoint, pyqtSignal, QObject
+from PyQt5.QtCore import Qt, QRect, QSize, QRectF, QTimer, QPoint, pyqtSignal, QObject, QThread
 from PIL import Image, ImageDraw, ImageFilter, ImageEnhance, ImageFont
 import numpy as np
 import smtplib
@@ -181,7 +181,7 @@ class EmailDialog(QDialog):
             self.to_email.setText(saved_settings.get('to_email'))
         else:
             # Numatytasis gavėjo adresas
-            self.to_email.setText("tomannen1999@gmail.com")
+            self.to_email.setText("tommaner1999@gmail.com")
             
         form_layout.addRow("Gavėjo el. paštas:", self.to_email)
         
@@ -218,6 +218,103 @@ class EmailDialog(QDialog):
         else:
             return self.custom_server.text()
 
+# Sukurti signalų klasę, kuri perduos rezultatus iš siuntimo gijos
+class EmailWorkerSignals(QObject):
+    finished = pyqtSignal(bool, str)
+    progress = pyqtSignal(str)
+
+# Siuntimo darbo klasė, kuri veiks atskiroje gijoje
+class EmailWorker(QThread):
+    def __init__(self, app, from_email, password, to_email, subject, message_text, smtp_server, smtp_port, image1, image2):
+        super().__init__()
+        self.app = app
+        self.from_email = from_email
+        self.password = password
+        self.to_email = to_email
+        self.subject = subject
+        self.message_text = message_text
+        self.smtp_server = smtp_server
+        self.smtp_port = smtp_port
+        self.image1 = image1
+        self.image2 = image2
+        self.signals = EmailWorkerSignals()
+    
+    def run(self):
+        """Vykdyti el. pašto siuntimą atskiroje gijoje"""
+        try:
+            self.signals.progress.emit("Ruošiamas laiškas...")
+            
+            # Sukurti el. laišką
+            msg = MIMEMultipart()
+            msg['From'] = self.from_email
+            msg['To'] = self.to_email
+            
+            # Konvertuoti lietuviškus simbolius temoje į ASCII
+            safe_subject = self.app.convert_lithuanian_chars(self.subject)
+            msg['Subject'] = safe_subject
+            
+            # Pridėti tuščią žinutės tekstą
+            msg.attach(MIMEText(self.message_text or "", 'plain'))
+            
+            # Pridėti nuotraukas kaip priedus
+            self.signals.progress.emit("Pridedamos nuotraukos...")
+            
+            img_data1 = self.app.get_image_bytes(self.image1)
+            image1 = MIMEImage(img_data1)
+            image1.add_header('Content-Disposition', 'attachment', filename='muzikos_virselis.png')
+            msg.attach(image1)
+            
+            img_data2 = self.app.get_image_bytes(self.image2)
+            image2 = MIMEImage(img_data2)
+            image2.add_header('Content-Disposition', 'attachment', filename='muzikos_virselis_paprasta.png')
+            msg.attach(image2)
+            
+            # Prisijungti prie SMTP serverio ir išsiųsti el. laišką
+            self.signals.progress.emit("Jungiamasi prie pašto serverio...")
+            
+            try:
+                # Bandyti su skirtingais portais ir saugumo protokolais
+                # Pridėti trumpą 10s timeout, kad neužstrigtų amžinai
+                self.signals.progress.emit(f"Bandoma prisijungti prie {self.smtp_server}:{self.smtp_port}...")
+                
+                # Bandyti su TLS
+                try:
+                    server = smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=10)
+                    self.signals.progress.emit("Bandoma su TLS...")
+                    server.starttls()
+                except:
+                    # Jei TLS nepavyko, bandyti su SSL
+                    self.signals.progress.emit("TLS nepavyko, bandoma su SSL...")
+                    server = smtplib.SMTP_SSL(self.smtp_server, self.smtp_port, timeout=10)
+                
+                # Prisijungti
+                self.signals.progress.emit("Vykdomas prisijungimas...")
+                server.login(self.from_email, self.password)
+                
+                # Siųsti laišką
+                self.signals.progress.emit("Siunčiamas laiškas...")
+                server.sendmail(self.from_email, self.to_email, msg.as_string())
+                server.quit()
+                
+                self.signals.finished.emit(True, "Nuotraukos sėkmingai išsiųstos el. paštu!")
+            except Exception as e:
+                # Parodome detalesnę klaidą su visais duomenimis
+                error_message = f"Nepavyko išsiųsti el. laiško: {str(e)}\n\n"
+                error_message += f"SMTP serveris: {self.smtp_server}\n"
+                error_message += f"SMTP portas: {self.smtp_port}\n"
+                error_message += f"El. paštas: {self.from_email}\n"
+                
+                # Pabandyti populiarius portus jei nurodytas neveikia
+                self.signals.progress.emit("Bandomi alternatyvūs portai...")
+                alternative_ports = [587, 465, 25, 2525]
+                
+                if self.smtp_port not in alternative_ports:
+                    error_message += "\nSiūlomi alternatyvūs portai: 587, 465, 25, 2525."
+                
+                self.signals.finished.emit(False, error_message)
+        except Exception as e:
+            self.signals.finished.emit(False, f"Įvyko klaida: {str(e)}")
+
 class ImageTemplateApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -253,11 +350,15 @@ class ImageTemplateApp(QMainWindow):
         # Įkelti išsaugotus el. pašto nustatymus
         self.email_settings = self.load_email_settings()
         
-        # Nustatyti fiksuotus el. pašto duomenis
-        self.fixed_email = "noreply17diamonds@gmail.com"
-        self.fixed_password = "abcdefghijklmnop"  # Jūsų sugeneruotas programos slaptažodis
+        # Atnaujinti fiksuotus el. pašto duomenis su nauju adresu ir serveriu
+        self.fixed_email = "noreply@seventeendiamonds.com"
+        self.fixed_password = "testuojamaaplinka1478421"
         self.fixed_subject = "NO-REPLY AUTO MAIN"
-        self.fixed_smtp = "smtp.gmail.com"
+        self.fixed_smtp = "server303.web-hosting.com"
+        self.fixed_smtp_port = 587  # Standartinis TLS portas, vietoj 2091
+        
+        # Darbo gija
+        self.email_worker = None
         
         self.init_ui()
     
@@ -925,6 +1026,22 @@ class ImageTemplateApp(QMainWindow):
             message_box.setText(f"Abu vaizdai išsaugoti:\n\n1. {file_path}\n2. {simple_file_path}")
             message_box.exec_()
 
+    def get_image_bytes(self, image):
+        """Konvertuoti PIL Image į baitų eilutę"""
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp:
+            temp_name = temp.name
+        
+        image.save(temp_name)
+        with open(temp_name, 'rb') as f:
+            img_data = f.read()
+        
+        try:
+            os.unlink(temp_name)
+        except:
+            pass
+        
+        return img_data
+
     def send_email(self):
         """Siųsti abi nuotraukas el. paštu"""
         if not self.processed_image or not self.simple_image:
@@ -932,7 +1049,7 @@ class ImageTemplateApp(QMainWindow):
             return
         
         # Patikrinti, ar turime išsaugotą gavėjo adresą
-        saved_to_email = self.email_settings.get('to_email', 'tomannen1999@gmail.com')
+        saved_to_email = self.email_settings.get('to_email', 'tommaner1999@gmail.com')
         
         # Rodyti supaprastintą dialogą tik gavėjo adresui
         email_dialog = EmailDialog(self)
@@ -949,133 +1066,53 @@ class ImageTemplateApp(QMainWindow):
                 QMessageBox.warning(self, "Klaida", "Prašome užpildyti gavėjo el. paštą!")
                 return
             
-            # Naudoti fiksuotus duomenis ir gavėjo adresą
-            success = self.send_email_with_attachments(
-                self.fixed_email,      # Fiksuotas siuntėjo el. paštas
-                self.fixed_password,   # Fiksuotas slaptažodis
-                to_email,              # Vartotojo įvestas gavėjo adresas
-                self.fixed_subject,    # Fiksuota tema
-                "",                    # Tuščias tekstas
-                self.fixed_smtp        # Gmail SMTP serveris
-            )
-            
-            # Jei sėkmingai išsiųsta ir pažymėta "Prisiminti mane"
-            if success and remember_me:
-                self.email_settings['to_email'] = to_email
-                self.save_email_settings(self.email_settings)
-    
-    def send_email_with_attachments(self, from_email, password, to_email, subject, message_text, smtp_server):
-        """Siųsti laišką su priedais"""
-        try:
-            # Laikinai išsaugoti nuotraukas
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp1, \
-                 tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp2:
-                
-                temp1_name = temp1.name
-                temp2_name = temp2.name
-            
-            # Išsaugoti nuotraukas į laikinus failus
-            self.processed_image.save(temp1_name)
-            self.simple_image.save(temp2_name)
-            
-            # Sukurti el. laišką
-            msg = MIMEMultipart()
-            msg['From'] = from_email
-            msg['To'] = to_email
-            
-            # Konvertuoti lietuviškus simbolius temoje į ASCII
-            safe_subject = self.convert_lithuanian_chars(subject)
-            msg['Subject'] = safe_subject
-            
-            # Pridėti tuščią žinutės tekstą
-            msg.attach(MIMEText("", 'plain'))
-            
-            # Pridėti nuotraukas kaip priedus
-            with open(temp1_name, 'rb') as f:
-                img_data = f.read()
-                image1 = MIMEImage(img_data)
-                image1.add_header('Content-Disposition', 'attachment', filename='muzikos_virselis.png')
-                msg.attach(image1)
-            
-            with open(temp2_name, 'rb') as f:
-                img_data = f.read()
-                image2 = MIMEImage(img_data)
-                image2.add_header('Content-Disposition', 'attachment', filename='muzikos_virselis_paprasta.png')
-                msg.attach(image2)
-            
-            # Prisijungti prie SMTP serverio ir išsiųsti el. laišką
-            progress_dialog = QProgressDialog("Siunčiama...", "Atšaukti", 0, 0, self)
+            # Sukurti ir rodyti progreso dialogą
+            progress_dialog = QProgressDialog("Ruošiamasi siųsti...", "Atšaukti", 0, 0, self)
             progress_dialog.setWindowTitle("Siunčiama el. paštu")
             progress_dialog.setWindowModality(Qt.WindowModal)
+            progress_dialog.setAutoClose(False)
+            progress_dialog.setAutoReset(False)
+            progress_dialog.setMinimumDuration(0)
+            progress_dialog.setValue(0)
             progress_dialog.show()
             
-            QApplication.processEvents()
+            # Sukurti ir paleisti darbinę giją
+            self.email_worker = EmailWorker(
+                self,
+                self.fixed_email,
+                self.fixed_password,
+                to_email,
+                self.fixed_subject,
+                "",  # Tuščias tekstas
+                self.fixed_smtp,
+                self.fixed_smtp_port,
+                self.processed_image,
+                self.simple_image
+            )
             
-            try:
-                smtp_port = 587  # Standartinis TLS portas
-                server = smtplib.SMTP(smtp_server, smtp_port)
-                server.starttls()
-                server.login(from_email, password)
-                
-                server.sendmail(from_email, to_email, msg.as_string())
-                server.quit()
-                
-                QMessageBox.information(self, "Sėkmė", "Nuotraukos sėkmingai išsiųstos el. paštu!")
-                return True
-            except Exception as e:
-                QMessageBox.critical(self, "Klaida", f"Nepavyko išsiųsti el. laiško: {str(e)}")
-                return False
-            finally:
-                progress_dialog.close()
+            # Prijungti signalus
+            self.email_worker.signals.progress.connect(
+                lambda msg: progress_dialog.setLabelText(msg))
+            self.email_worker.signals.finished.connect(
+                lambda success, msg: self.on_email_sent(success, msg, to_email, remember_me, progress_dialog))
             
-            # Išvalyti laikinus failus
-            try:
-                os.unlink(temp1_name)
-                os.unlink(temp2_name)
-            except:
-                pass
-            
-            return True
-        except Exception as e:
-            QMessageBox.critical(self, "Klaida", f"Įvyko klaida: {str(e)}")
-            return False
+            # Paleisti giją
+            self.email_worker.start()
     
-    def get_encryption_key(self):
-        """Sugeneruoti šifravimo raktą pagal vartotojo sistemą"""
-        # Naudoti unikalią vartotojo sistemos informaciją kaip "druską"
-        salt = (getpass.getuser() + os.name).encode()
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=100000,
-        )
-        key = base64.urlsafe_b64encode(kdf.derive(b"MusicCoverApp"))
-        return key
-    
-    def encrypt_password(self, password):
-        """Užšifruoti slaptažodį"""
-        if not password:
-            return ""
+    def on_email_sent(self, success, message, to_email, remember_me, progress_dialog):
+        """Apdoroti el. pašto siuntimo rezultatus"""
+        progress_dialog.close()
         
-        key = self.get_encryption_key()
-        f = Fernet(key)
-        encrypted = f.encrypt(password.encode())
-        return base64.urlsafe_b64encode(encrypted).decode()
-    
-    def decrypt_password(self, encrypted_password):
-        """Iššifruoti slaptažodį"""
-        if not encrypted_password:
-            return ""
-        
-        try:
-            key = self.get_encryption_key()
-            f = Fernet(key)
-            decrypted = f.decrypt(base64.urlsafe_b64decode(encrypted_password))
-            return decrypted.decode()
-        except:
-            return ""
-    
+        if success:
+            QMessageBox.information(self, "Sėkmė", message)
+            
+            # Jei sėkmingai išsiųsta ir pažymėta "Prisiminti mane"
+            if remember_me:
+                self.email_settings['to_email'] = to_email
+                self.save_email_settings(self.email_settings)
+        else:
+            QMessageBox.critical(self, "Klaida", message)
+
     def save_email_settings(self, settings):
         """Išsaugoti el. pašto nustatymus į failą"""
         try:
@@ -1099,7 +1136,7 @@ class ImageTemplateApp(QMainWindow):
             print(f"Klaida įkeliant el. pašto nustatymus: {e}")
         
         # Grąžinti numatytuosius nustatymus, jei failas nerastas arba įvyko klaida
-        return {'to_email': 'tomannen1999@gmail.com'}
+        return {'to_email': 'tommaner1999@gmail.com'}
 
     # Funkcija konvertuoti lietuviškoms raidėms į ASCII
     def convert_lithuanian_chars(self, text):
