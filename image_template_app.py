@@ -119,19 +119,27 @@ class ImageTemplateApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Muzikos Viršelio Kūrėjas")
-        self.setMinimumSize(1000, 700)
+        
+        # Nustatyti fiksuotą pradinį lango dydį
+        self.resize(1920, 1080)
+        
+        # Pridėti maksimizavimą:
+        self.showMaximized()  # Atidarys langą maksimizuotame režime
         
         self.input_image_path = None
         self.processed_image = None
         self.blur_amount = 60  # Numatytasis blur kiekis (60%)
+        
+        # Kintamieji kešavimui
+        self.cached_background = None
+        self.cached_blur_amount = None
+        self.cached_image_path = None  # Išsaugos kelią iki paskutinio kešuoto vaizdo
         
         # Nustatyti tamsų stilių visai aplikacijai
         self.set_dark_style()
         
         # Kintamieji optimizacijai
         self.processing_thread = None
-        self.cached_background = None
-        self.cached_blur_amount = None
         self.last_text_change_time = 0
         self.text_change_timer = QTimer()
         self.text_change_timer.setSingleShot(True)
@@ -362,6 +370,11 @@ class ImageTemplateApp(QMainWindow):
         file_path, _ = file_dialog.getOpenFileName(self, "Pasirinkti vaizdą", "", "Vaizdų failai (*.png *.jpg *.jpeg)")
         
         if file_path:
+            # Išvalyti kešą, kai pasirenkamas naujas vaizdas
+            if file_path != self.input_image_path:
+                self.cached_background = None  # Išvalyti foninio vaizdo kešą
+                self.cached_image_path = None  # Išvalyti kelią
+            
             self.input_image_path = file_path
             self.process_image()
             self.export_btn.setEnabled(True)
@@ -400,8 +413,11 @@ class ImageTemplateApp(QMainWindow):
         # Naudoti blur_amount parametrą, jei jis perduotas
         blur_amount = blur_amount if blur_amount is not None else self.blur_amount
         
-        # Cachinti fono vaizdą, jei blur reikšmė nepasikeitė
-        if self.cached_background is None or self.cached_blur_amount != blur_amount:
+        # Kešuoti fono vaizdą, TIK jei blur reikšmė ir vaizdo kelias nepasikeitė
+        if (self.cached_background is None or 
+            self.cached_blur_amount != blur_amount or 
+            self.cached_image_path != image_path):  # Patikrinti ar nepasikeitė vaizdas
+            
             # Atidaryti pradinį vaizdą
             original = Image.open(image_path).convert("RGB")
             
@@ -424,7 +440,7 @@ class ImageTemplateApp(QMainWindow):
             # Pakeisti dydį
             background = original_resized.resize((target_width, target_height), Image.LANCZOS)
             
-            # Pritaikyti blur efektą - tai užima daug resursų, todėl cachinama
+            # Pritaikyti blur efektą - tai užima daug resursų, todėl kešuojama
             if blur_amount > 0:
                 # Sumažinti dydį prieš blur (greitesnis apdorojimas)
                 blur_img = background.resize((target_width // 2, target_height // 2), Image.LANCZOS)
@@ -445,11 +461,12 @@ class ImageTemplateApp(QMainWindow):
             temp.paste(final_background.convert("RGBA"), (0, 0))
             final_background = Image.alpha_composite(temp, overlay).convert("RGB")
             
-            # Išsaugoti cachintus objektus
+            # Išsaugoti kešuotus objektus
             self.cached_background = final_background.copy()
             self.cached_blur_amount = blur_amount
+            self.cached_image_path = image_path  # Išsaugoti kelią iki vaizdo
         else:
-            # Naudoti cachintą foną
+            # Naudoti kešuotą foną
             final_background = self.cached_background.copy()
         
         # Sukurti galutinį vaizdą
