@@ -5,11 +5,25 @@ import time
 from threading import Thread
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QLabel, QPushButton, QFileDialog, QLineEdit, QFrame, QSizePolicy,
-                            QSlider, QFormLayout)
+                            QSlider, QFormLayout, QMessageBox, QDialog, QTextEdit, 
+                            QComboBox, QProgressDialog, QCheckBox)
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QPainterPath, QColor, QFont, QCursor, QPen, QBrush
 from PyQt5.QtCore import Qt, QRect, QSize, QRectF, QTimer, QPoint, pyqtSignal, QObject
 from PIL import Image, ImageDraw, ImageFilter, ImageEnhance, ImageFont
 import numpy as np
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+import tempfile
+import keyring
+import base64
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import getpass
+import json
+from email.header import Header
 
 # Kurkime signalų klasę, kuri leis komunikuoti tarp gijų
 class WorkerSignals(QObject):
@@ -114,6 +128,95 @@ class StarryBackground(QWidget):
                 )
             )
 
+class EmailDialog(QDialog):
+    """Dialogo langas el. pašto informacijai įvesti"""
+    def __init__(self, parent=None, saved_settings=None):
+        super().__init__(parent)
+        self.setWindowTitle("Siųsti el. paštu")
+        self.setMinimumWidth(400)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2D2D2D;
+                color: white;
+            }
+            QLabel {
+                color: white;
+            }
+            QLineEdit {
+                background-color: #3D3D3D;
+                color: white;
+                padding: 8px;
+                border: 1px solid #555;
+                border-radius: 4px;
+            }
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                padding: 8px 16px;
+                border: none;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton#cancelBtn {
+                background-color: #f44336;
+            }
+            QPushButton#cancelBtn:hover {
+                background-color: #d32f2f;
+            }
+        """)
+        
+        # Dialogo išdėstymas
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        
+        # El. pašto formos išdėstymas
+        form_layout = QFormLayout()
+        
+        # Gavėjo el. paštas - su numatytuoju adresu
+        self.to_email = QLineEdit()
+        if saved_settings and saved_settings.get('to_email'):
+            self.to_email.setText(saved_settings.get('to_email'))
+        else:
+            # Numatytasis gavėjo adresas
+            self.to_email.setText("tomannen1999@gmail.com")
+            
+        form_layout.addRow("Gavėjo el. paštas:", self.to_email)
+        
+        # Prisiminti mane žymimasis langelis
+        self.remember_me = QCheckBox("Prisiminti mane")
+        self.remember_me.setChecked(True)  # Numatytuoju atveju pažymėtas
+        form_layout.addRow("", self.remember_me)
+        
+        layout.addLayout(form_layout)
+        
+        # Mygtukai
+        buttons_layout = QHBoxLayout()
+        self.send_btn = QPushButton("Siųsti")
+        self.send_btn.clicked.connect(self.accept)
+        
+        self.cancel_btn = QPushButton("Atšaukti")
+        self.cancel_btn.setObjectName("cancelBtn")
+        self.cancel_btn.clicked.connect(self.reject)
+        
+        buttons_layout.addWidget(self.cancel_btn)
+        buttons_layout.addWidget(self.send_btn)
+        
+        layout.addLayout(buttons_layout)
+    
+    def get_smtp_server(self):
+        """Gauti pasirinktą SMTP serverį"""
+        index = self.server_combo.currentIndex()
+        if index == 0:
+            return "smtp.gmail.com"
+        elif index == 1:
+            return "smtp-mail.outlook.com"
+        elif index == 2:
+            return "smtp.mail.yahoo.com"
+        else:
+            return self.custom_server.text()
 
 class ImageTemplateApp(QMainWindow):
     def __init__(self):
@@ -144,6 +247,17 @@ class ImageTemplateApp(QMainWindow):
         self.text_change_timer = QTimer()
         self.text_change_timer.setSingleShot(True)
         self.text_change_timer.timeout.connect(self.delayed_text_change)
+        
+        self.simple_image = None  # Naujas kintamasis paprastai 9:16 versijai
+        
+        # Įkelti išsaugotus el. pašto nustatymus
+        self.email_settings = self.load_email_settings()
+        
+        # Nustatyti fiksuotus el. pašto duomenis
+        self.fixed_email = "noreply17diamonds@gmail.com"
+        self.fixed_password = "abcdefghijklmnop"  # Jūsų sugeneruotas programos slaptažodis
+        self.fixed_subject = "NO-REPLY AUTO MAIN"
+        self.fixed_smtp = "smtp.gmail.com"
         
         self.init_ui()
     
@@ -264,7 +378,10 @@ class ImageTemplateApp(QMainWindow):
         
         left_layout.addLayout(form_layout)
         
-        # Eksporto mygtukas
+        # Pridėti el. pašto mygtuką šalia eksporto mygtuko
+        email_export_layout = QHBoxLayout()
+        
+        # Eksporto mygtukas (esamas)
         self.export_btn = QPushButton("💾 Eksportuoti")
         self.export_btn.clicked.connect(self.export_image)
         self.export_btn.setEnabled(False)
@@ -283,7 +400,53 @@ class ImageTemplateApp(QMainWindow):
                 color: #666666;
             }
         """)
-        left_layout.addWidget(self.export_btn)
+        
+        # El. pašto mygtukas (naujas)
+        self.email_btn = QPushButton("📧 Siųsti el. paštu")
+        self.email_btn.clicked.connect(self.send_email)
+        self.email_btn.setEnabled(False)
+        self.email_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;  /* Mėlyna spalva */
+                padding: 10px;
+                font-size: 16px;
+                margin-top: 20px;
+            }
+            QPushButton:hover {
+                background-color: #0b7dda;
+            }
+            QPushButton:disabled {
+                background-color: #333333;
+                color: #666666;
+            }
+        """)
+        
+        email_export_layout.addWidget(self.export_btn)
+        email_export_layout.addWidget(self.email_btn)
+        
+        left_layout.addLayout(email_export_layout)
+        
+        # NAUJAS KODAS: Pridėti skyrelį paprastai 9:16 versijai
+        simple_section = QFrame()
+        simple_section.setStyleSheet("background-color: rgba(30, 30, 40, 100); border-radius: 10px; padding: 10px;")
+        simple_layout = QVBoxLayout()
+        simple_section.setLayout(simple_layout)
+        
+        # Antraštė
+        simple_title = QLabel("Paprasta 9:16 versija")
+        simple_title.setStyleSheet("font-size: 16px; font-weight: bold; color: white; margin-bottom: 10px;")
+        simple_title.setAlignment(Qt.AlignCenter)
+        simple_layout.addWidget(simple_title)
+        
+        # Peržiūros etiketė paprastai versijai
+        self.simple_preview = QLabel("Paprasta versija")
+        self.simple_preview.setStyleSheet("background-color: rgba(30, 30, 40, 50); color: white; border-radius: 5px; padding: 5px;")
+        self.simple_preview.setAlignment(Qt.AlignCenter)
+        self.simple_preview.setFixedHeight(150)  # Fiksuotas aukštis, kad nekistų UI
+        simple_layout.addWidget(self.simple_preview)
+        
+        # Pridėti skyrių į kairįjį skydelį
+        left_layout.addWidget(simple_section)
         
         left_layout.addStretch()
         
@@ -366,8 +529,23 @@ class ImageTemplateApp(QMainWindow):
             self.process_image()
     
     def select_image(self):
+        # Nustatyti Downloads katalogo kelią
+        downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+        
+        # Patikrinti, ar katalogas egzistuoja
+        if not os.path.exists(downloads_dir):
+            # Jei Downloads nerastas, bandyti alternatyvius pavadinimus
+            downloads_dir = os.path.join(os.path.expanduser("~"), "Atsisiuntimai")  # Lietuviškas Windows
+            if not os.path.exists(downloads_dir):
+                downloads_dir = ""  # Jei vis tiek nerastas, naudoti numatytąjį katalogą
+        
         file_dialog = QFileDialog()
-        file_path, _ = file_dialog.getOpenFileName(self, "Pasirinkti vaizdą", "", "Vaizdų failai (*.png *.jpg *.jpeg)")
+        file_path, _ = file_dialog.getOpenFileName(
+            self, 
+            "Pasirinkti vaizdą", 
+            downloads_dir,  # Pradinis katalogas - Downloads
+            "Vaizdų failai (*.png *.jpg *.jpeg)"
+        )
         
         if file_path:
             # Išvalyti kešą, kai pasirenkamas naujas vaizdas
@@ -378,6 +556,7 @@ class ImageTemplateApp(QMainWindow):
             self.input_image_path = file_path
             self.process_image()
             self.export_btn.setEnabled(True)
+            self.email_btn.setEnabled(True)  # Įjungti el. pašto mygtuką
     
     def process_image(self):
         if not self.input_image_path:
@@ -387,16 +566,14 @@ class ImageTemplateApp(QMainWindow):
         title = self.title_input.text() or "TAU MICH AUF"
         artist = self.artist_input.text() or "NIKLAS DEE"
         
-        # Paleisti apdorojimą atskiroje gijoje
-        self.processing_thread = ImageProcessingThread(
-            self, self.input_image_path, title, artist, self.blur_amount
-        )
-        self.processing_thread.signals.finished.connect(self.on_image_processed)
-        self.processing_thread.start()
-    
-    def on_image_processed(self, result):
-        """Iškviečiama, kai vaizdo apdorojimas baigtas"""
-        self.processed_image = result
+        # Sukurti paprastą 9:16 versiją
+        self.simple_image = self.create_simple_9_16(self.input_image_path)
+        
+        # Atnaujinti paprastos versijos peržiūrą
+        self.update_simple_preview()
+        
+        # Apdoroti vaizdą
+        self.processed_image = self.create_template(self.input_image_path, title, artist)
         
         # Konvertuoti PIL vaizdą į QPixmap
         img_array = np.array(self.processed_image)
@@ -408,6 +585,50 @@ class ImageTemplateApp(QMainWindow):
         # Pritaikyti peržiūros etiketei
         scaled_pixmap = pixmap.scaled(self.preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.preview_label.setPixmap(scaled_pixmap)
+    
+    def update_simple_preview(self):
+        """Atnaujina paprastos 9:16 versijos peržiūrą"""
+        if self.simple_image:
+            # Konvertuoti PIL vaizdą į QPixmap
+            img_array = np.array(self.simple_image)
+            height, width, channels = img_array.shape
+            bytes_per_line = channels * width
+            q_img = QImage(img_array.data, width, height, bytes_per_line, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(q_img)
+            
+            # Pritaikyti peržiūros etiketei
+            scaled_pixmap = pixmap.scaled(self.simple_preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.simple_preview.setPixmap(scaled_pixmap)
+    
+    def create_simple_9_16(self, image_path):
+        """Sukuria paprastą 9:16 vaizdo versiją be jokių papildomų efektų"""
+        # Atidaryti pradinį vaizdą
+        original = Image.open(image_path).convert("RGB")
+        
+        # Nustatyti 9:16 santykį
+        target_ratio = 9/16
+        width, height = original.size
+        
+        # Pakeisti dydį išlaikant santykį
+        if width / height > target_ratio:  # Per platus
+            new_width = int(height * target_ratio)
+            new_height = height
+            left = (width - new_width) // 2
+            right = left + new_width
+            cropped = original.crop((left, 0, right, height))
+        else:  # Per aukštas
+            new_width = width
+            new_height = int(width / target_ratio)
+            top = (height - new_height) // 2
+            bottom = top + new_height
+            cropped = original.crop((0, top, width, bottom))
+        
+        # Pakeisti dydį
+        target_width = 1080
+        target_height = 1920
+        resized = cropped.resize((target_width, target_height), Image.LANCZOS)
+        
+        return resized
     
     def create_template(self, image_path, title, artist, blur_amount=None):
         # Naudoti blur_amount parametrą, jei jis perduotas
@@ -663,14 +884,234 @@ class ImageTemplateApp(QMainWindow):
         ], fill=(255, 255, 255))
     
     def export_image(self):
-        if not self.processed_image:
+        if not self.processed_image or not self.simple_image:
             return
         
+        # Nustatyti Downloads katalogo kelią
+        downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+        
+        # Patikrinti, ar katalogas egzistuoja
+        if not os.path.exists(downloads_dir):
+            downloads_dir = os.path.join(os.path.expanduser("~"), "Atsisiuntimai")
+            if not os.path.exists(downloads_dir):
+                downloads_dir = ""
+        
+        # Sugeneruoti numatytąjį failo pavadinimą
+        default_filename = "Muzikos_Virselis.png"
+        default_path = os.path.join(downloads_dir, default_filename)
+        
         file_dialog = QFileDialog()
-        file_path, _ = file_dialog.getSaveFileName(self, "Išsaugoti vaizdą", "", "PNG failai (*.png);;JPEG failai (*.jpg)")
+        file_path, _ = file_dialog.getSaveFileName(
+            self, 
+            "Išsaugoti vaizdą", 
+            default_path,
+            "PNG failai (*.png);;JPEG failai (*.jpg)"
+        )
         
         if file_path:
+            # Išsaugoti pagrindinį vaizdą
             self.processed_image.save(file_path)
+            
+            # Išsaugoti paprastą versiją
+            # Gauti failo tipą iš pasirinkto kelio
+            file_name, file_ext = os.path.splitext(file_path)
+            simple_file_path = f"{file_name}_paprasta{file_ext}"
+            self.simple_image.save(simple_file_path)
+            
+            # Pranešti vartotojui apie sėkmingą išsaugojimą
+            message_box = QMessageBox()
+            message_box.setIcon(QMessageBox.Information)
+            message_box.setWindowTitle("Išsaugota")
+            message_box.setText(f"Abu vaizdai išsaugoti:\n\n1. {file_path}\n2. {simple_file_path}")
+            message_box.exec_()
+
+    def send_email(self):
+        """Siųsti abi nuotraukas el. paštu"""
+        if not self.processed_image or not self.simple_image:
+            QMessageBox.warning(self, "Klaida", "Pirmiausia pasirinkite nuotrauką!")
+            return
+        
+        # Patikrinti, ar turime išsaugotą gavėjo adresą
+        saved_to_email = self.email_settings.get('to_email', 'tomannen1999@gmail.com')
+        
+        # Rodyti supaprastintą dialogą tik gavėjo adresui
+        email_dialog = EmailDialog(self)
+        email_dialog.to_email.setText(saved_to_email)
+        
+        result = email_dialog.exec_()
+        
+        if result == QDialog.Accepted:
+            to_email = email_dialog.to_email.text()
+            remember_me = email_dialog.remember_me.isChecked()
+            
+            # Patikrinti, ar gavėjo adresas užpildytas
+            if not to_email:
+                QMessageBox.warning(self, "Klaida", "Prašome užpildyti gavėjo el. paštą!")
+                return
+            
+            # Naudoti fiksuotus duomenis ir gavėjo adresą
+            success = self.send_email_with_attachments(
+                self.fixed_email,      # Fiksuotas siuntėjo el. paštas
+                self.fixed_password,   # Fiksuotas slaptažodis
+                to_email,              # Vartotojo įvestas gavėjo adresas
+                self.fixed_subject,    # Fiksuota tema
+                "",                    # Tuščias tekstas
+                self.fixed_smtp        # Gmail SMTP serveris
+            )
+            
+            # Jei sėkmingai išsiųsta ir pažymėta "Prisiminti mane"
+            if success and remember_me:
+                self.email_settings['to_email'] = to_email
+                self.save_email_settings(self.email_settings)
+    
+    def send_email_with_attachments(self, from_email, password, to_email, subject, message_text, smtp_server):
+        """Siųsti laišką su priedais"""
+        try:
+            # Laikinai išsaugoti nuotraukas
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp1, \
+                 tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp2:
+                
+                temp1_name = temp1.name
+                temp2_name = temp2.name
+            
+            # Išsaugoti nuotraukas į laikinus failus
+            self.processed_image.save(temp1_name)
+            self.simple_image.save(temp2_name)
+            
+            # Sukurti el. laišką
+            msg = MIMEMultipart()
+            msg['From'] = from_email
+            msg['To'] = to_email
+            
+            # Konvertuoti lietuviškus simbolius temoje į ASCII
+            safe_subject = self.convert_lithuanian_chars(subject)
+            msg['Subject'] = safe_subject
+            
+            # Pridėti tuščią žinutės tekstą
+            msg.attach(MIMEText("", 'plain'))
+            
+            # Pridėti nuotraukas kaip priedus
+            with open(temp1_name, 'rb') as f:
+                img_data = f.read()
+                image1 = MIMEImage(img_data)
+                image1.add_header('Content-Disposition', 'attachment', filename='muzikos_virselis.png')
+                msg.attach(image1)
+            
+            with open(temp2_name, 'rb') as f:
+                img_data = f.read()
+                image2 = MIMEImage(img_data)
+                image2.add_header('Content-Disposition', 'attachment', filename='muzikos_virselis_paprasta.png')
+                msg.attach(image2)
+            
+            # Prisijungti prie SMTP serverio ir išsiųsti el. laišką
+            progress_dialog = QProgressDialog("Siunčiama...", "Atšaukti", 0, 0, self)
+            progress_dialog.setWindowTitle("Siunčiama el. paštu")
+            progress_dialog.setWindowModality(Qt.WindowModal)
+            progress_dialog.show()
+            
+            QApplication.processEvents()
+            
+            try:
+                smtp_port = 587  # Standartinis TLS portas
+                server = smtplib.SMTP(smtp_server, smtp_port)
+                server.starttls()
+                server.login(from_email, password)
+                
+                server.sendmail(from_email, to_email, msg.as_string())
+                server.quit()
+                
+                QMessageBox.information(self, "Sėkmė", "Nuotraukos sėkmingai išsiųstos el. paštu!")
+                return True
+            except Exception as e:
+                QMessageBox.critical(self, "Klaida", f"Nepavyko išsiųsti el. laiško: {str(e)}")
+                return False
+            finally:
+                progress_dialog.close()
+            
+            # Išvalyti laikinus failus
+            try:
+                os.unlink(temp1_name)
+                os.unlink(temp2_name)
+            except:
+                pass
+            
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "Klaida", f"Įvyko klaida: {str(e)}")
+            return False
+    
+    def get_encryption_key(self):
+        """Sugeneruoti šifravimo raktą pagal vartotojo sistemą"""
+        # Naudoti unikalią vartotojo sistemos informaciją kaip "druską"
+        salt = (getpass.getuser() + os.name).encode()
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=100000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(b"MusicCoverApp"))
+        return key
+    
+    def encrypt_password(self, password):
+        """Užšifruoti slaptažodį"""
+        if not password:
+            return ""
+        
+        key = self.get_encryption_key()
+        f = Fernet(key)
+        encrypted = f.encrypt(password.encode())
+        return base64.urlsafe_b64encode(encrypted).decode()
+    
+    def decrypt_password(self, encrypted_password):
+        """Iššifruoti slaptažodį"""
+        if not encrypted_password:
+            return ""
+        
+        try:
+            key = self.get_encryption_key()
+            f = Fernet(key)
+            decrypted = f.decrypt(base64.urlsafe_b64decode(encrypted_password))
+            return decrypted.decode()
+        except:
+            return ""
+    
+    def save_email_settings(self, settings):
+        """Išsaugoti el. pašto nustatymus į failą"""
+        try:
+            settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "email_settings.json")
+            with open(settings_path, 'w') as f:
+                json.dump(settings, f)
+            
+            # Atnaujinti dabartinius nustatymus
+            self.email_settings = settings
+        except Exception as e:
+            print(f"Klaida išsaugant el. pašto nustatymus: {e}")
+    
+    def load_email_settings(self):
+        """Įkelti el. pašto nustatymus iš failo"""
+        try:
+            settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "email_settings.json")
+            if os.path.exists(settings_path):
+                with open(settings_path, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"Klaida įkeliant el. pašto nustatymus: {e}")
+        
+        # Grąžinti numatytuosius nustatymus, jei failas nerastas arba įvyko klaida
+        return {'to_email': 'tomannen1999@gmail.com'}
+
+    # Funkcija konvertuoti lietuviškoms raidėms į ASCII
+    def convert_lithuanian_chars(self, text):
+        replacements = {
+            'ą': 'a', 'č': 'c', 'ę': 'e', 'ė': 'e', 'į': 'i',
+            'š': 's', 'ų': 'u', 'ū': 'u', 'ž': 'z',
+            'Ą': 'A', 'Č': 'C', 'Ę': 'E', 'Ė': 'E', 'Į': 'I',
+            'Š': 'S', 'Ų': 'U', 'Ū': 'U', 'Ž': 'Z'
+        }
+        for lt, en in replacements.items():
+            text = text.replace(lt, en)
+        return text
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
