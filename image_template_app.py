@@ -800,6 +800,7 @@ class ImageTemplateApp(QMainWindow):
         
         # Nustatyti kvadrato dydį (~70% ekrano pločio)
         target_width = 1080
+        target_height = 1920
         square_size = int(target_width * 0.7)
         padding = 10  # 10px padding aplink kvadratą
         
@@ -814,7 +815,7 @@ class ImageTemplateApp(QMainWindow):
         
         # Centruoti poziciją - PAKELTI 200px į viršų
         x_pos = (target_width - square_size) // 2
-        y_pos = int(1920 * 0.3) - 200  # Pakelti 200px į viršų
+        y_pos = int(target_height * 0.3) - 200  # Pakelti 200px į viršų
         
         # Sukurti patamsintą foną kvadratui (75% ryškumo)
         dark_bg = Image.new('RGBA', (square_size + padding*2, square_size + padding*2), (0, 0, 0, 64))
@@ -835,19 +836,20 @@ class ImageTemplateApp(QMainWindow):
         # Pridėti teksto elementus
         draw = ImageDraw.Draw(final_image)
         
-        # Atlikėjo vardas - didžiosiomis raidėmis - PAKELTI 200px į viršų
-        artist_y = int(1920 * 0.75) - 200  # Pakelti 200px į viršų
-        artist_x = target_width // 2  # Centruota
-        self.draw_text_centered(draw, artist.upper(), artist_x, artist_y, 60)
+        # Nustatyti elementų pradžios poziciją - ties centrinės nuotraukos kairiuoju kraštu
+        elements_start_x = x_pos  # Kairysis nuotraukos kraštas
+        
+        # Atlikėjo vardas - PAKELTI 200px į viršų
+        artist_y = int(target_height * 0.75) - 200  # Pakelti 200px į viršų
+        self.draw_text_left_aligned(draw, artist.upper(), elements_start_x, artist_y, 60)
         
         # Dainos pavadinimas - po atlikėjo vardu
         title_y = artist_y + 80
-        title_x = target_width // 2  # Centruota
-        self.draw_text_centered(draw, title, title_x, title_y, 45)
+        self.draw_text_left_aligned(draw, title, elements_start_x, title_y, 45)
         
         # Progreso juosta - balta linija su tašku
         progress_y = title_y + 100
-        self.draw_progress_bar(draw, target_width, progress_y)
+        self.draw_progress_bar(draw, target_width, progress_y, elements_start_x, square_size)
         
         # Medijos valdikliai
         controls_y = progress_y + 80
@@ -871,24 +873,13 @@ class ImageTemplateApp(QMainWindow):
         
         return image.crop((left, top, right, bottom))
     
-    def draw_text_centered(self, draw, text, x, y, font_size):
-        """Piešia tekstą centruotą horizontaliai"""
+    def draw_text_left_aligned(self, draw, text, x, y, font_size, fill=(255, 255, 255)):
+        """Piešia tekstą, lygiuojant jį pagal kairę pusę"""
+        # Gauti šriftą
         font = self.get_font(font_size)
         
-        # Gauti teksto dydį
-        try:
-            left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
-            text_width = right - left
-            text_height = bottom - top
-        except AttributeError:
-            text_width, text_height = draw.textsize(text, font=font)
-        
-        # Apskaičiuojame centravimo pozicijas
-        text_x = x - text_width // 2
-        text_y = y - text_height // 2
-        
-        # Pagrindinis tekstas
-        draw.text((text_x, text_y), text, fill=(255, 255, 255), font=font)
+        # Piešti tekstą (be centravimo)
+        draw.text((x, y), text, fill=fill, font=font)
     
     def get_font(self, size):
         """Gauna šriftą"""
@@ -915,22 +906,38 @@ class ImageTemplateApp(QMainWindow):
         
         return ImageFont.load_default()
     
-    def draw_progress_bar(self, draw, width, y_pos):
-        # Progreso juosta - balta linija
-        bar_width = int(width * 0.7)  # 70% ekrano pločio
-        bar_height = 2
-        bar_x = (width - bar_width) // 2
+    def draw_progress_bar(self, draw, target_width, y_position, start_x=None, square_size=None):
+        """Piešia progreso juostą su nurodytu pradžios tašku"""
+        # Jei start_x nenurodyta, naudoti numatytąją reikšmę (80px nuo krašto)
+        if start_x is None:
+            start_x = 80
         
-        # Balta juosta
-        draw.rectangle([(bar_x, y_pos), (bar_x + bar_width, y_pos + bar_height)], 
-                      fill=(255, 255, 255))
+        # Jei square_size nenurodyta, apskaičiuojame numatytąją reikšmę
+        if square_size is None:
+            square_size = int(target_width * 0.7)  # Numatytoji reikšmė (~70% ekrano pločio)
         
-        # Progreso taškas - baltas apskritimas
-        progress_pos = bar_x + int(bar_width * 0.25)  # Maždaug 25% nuo kairės
-        circle_radius = 8
-        draw.ellipse([(progress_pos - circle_radius, y_pos - circle_radius + bar_height//2), 
-                     (progress_pos + circle_radius, y_pos + circle_radius + bar_height//2)], 
-                    fill=(255, 255, 255))
+        # Nustatyti progreso juostos parametrus
+        end_x = target_width - (target_width - square_size) // 2  # Ties dešiniuoju nuotraukos kraštu
+        progress_bar_length = end_x - start_x
+        progress_position = 0.3  # Progreso pozicija (30%)
+        
+        # Piešti baltą liniją
+        draw.line(
+            [(start_x, y_position), (end_x, y_position)],
+            fill=(255, 255, 255),
+            width=3
+        )
+        
+        # Apskaičiuoti taško poziciją
+        dot_x = start_x + progress_bar_length * progress_position
+        
+        # Piešti tašką
+        dot_radius = 8
+        draw.ellipse(
+            [(dot_x - dot_radius, y_position - dot_radius),
+             (dot_x + dot_radius, y_position + dot_radius)],
+            fill=(255, 255, 255)
+        )
     
     def draw_media_controls(self, draw, width, y_pos):
         # Medijos valdikliai - ankstesnis, atkurti/pristabdyti, kitas
