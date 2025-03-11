@@ -925,7 +925,7 @@ class ImageTemplateApp(QMainWindow):
         draw.line(
             [(start_x, y_position), (end_x, y_position)],
             fill=(255, 255, 255),
-            width=3
+            width=5
         )
         
         # Apskaičiuoti taško poziciją
